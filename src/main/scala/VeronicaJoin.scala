@@ -18,7 +18,8 @@ object VeronicaJoin {
     var maxS = s.length - ps + sOverlap
 
     var overlap = sOverlap
-    val eqOverlap = Math.min(r.length, math.ceil(threshold * (r.length + s.length) / (1.0 + threshold)).toInt)
+    val ceilValue = math.ceil(threshold * (r.length + s.length) / (1.0 + threshold)).toInt
+    val eqOverlap = math.min(r.length, math.min(s.length, ceilValue))
 
     while (maxR >= eqOverlap && maxS >= eqOverlap && overlap < eqOverlap) {
       val d = r(pr) - s(ps)
@@ -38,36 +39,36 @@ object VeronicaJoin {
     overlap >= eqOverlap
   }
 
-  private def verifyCandidates(S: Array[(Long, Array[Int])], idR: Long, recordR: Array[Int], candidates: Array[Int], cPos: Int, overlaps: Array[Int], threshold: Double, rPrefixLength: Int, selfJoin: Boolean): Array[(Long, Long)] = {
+  private def verifyCandidates(indexed: Array[(Long, Array[Int])], probingId: Long, probingRecord: Array[Int], candidates: Array[Int], cPos: Int, overlaps: Array[Int], threshold: Double, probingPrefixLength: Int, selfJoin: Boolean): Array[(Long, Long)] = {
     val result = new mutable.ArrayBuffer[(Long, Long)]()
     var cIdx = 0
 
     while (cIdx < cPos) {
-      val (idS, recordS) = S(candidates(cIdx))
+      val (indexedId, indexedRecord) = indexed(candidates(cIdx))
       val overlap = overlaps(candidates(cIdx))
 
-      var sIndexPrefixLength = 0
+      var indexedPrefixLength = 0
 
       if (selfJoin) {
-        val seqOverlap = threshold * (recordS.length + recordS.length) / (1.0 + threshold)
-        val seqOverlapCeil = Math.min(recordS.length, math.ceil(seqOverlap).toInt)
-        sIndexPrefixLength = recordS.length - seqOverlapCeil + 1
+        val seqOverlap = threshold * (indexedRecord.length + indexedRecord.length) / (1.0 + threshold)
+        val seqOverlapCeil = math.min(indexedRecord.length, math.ceil(seqOverlap).toInt)
+        indexedPrefixLength = indexedRecord.length - seqOverlapCeil + 1
 
       } else {
-        val sLowerBound = math.ceil(recordS.length.toDouble * threshold).toInt
-        sIndexPrefixLength = recordS.length - sLowerBound + 1
+        val indexedLowerBound = math.ceil(indexedRecord.length.toDouble * threshold).toInt
+        indexedPrefixLength = indexedRecord.length - indexedLowerBound + 1
       }
 
-      val rPrefixLast = recordR(rPrefixLength - 1)
-      val sPrefixLast = recordS(sIndexPrefixLength - 1)
+      val probingPrefixLast = probingRecord(probingPrefixLength - 1)
+      val indexedPrefixLast = indexedRecord(indexedPrefixLength - 1)
 
-      if (rPrefixLast < sPrefixLast) {
-        if (fastJaccard(recordR, recordS, threshold, rPrefixLength, overlap, overlap)) {
-          result += ((math.min(idR, idS), math.max(idR, idS)))
+      if (probingPrefixLast < indexedPrefixLast) {
+        if (fastJaccard(probingRecord, indexedRecord, threshold, probingPrefixLength, overlap, overlap)) {
+          result += ((math.min(probingId, indexedId), math.max(probingId, indexedId)))
         }
       } else {
-        if (fastJaccard(recordR, recordS, threshold, overlap, sIndexPrefixLength, overlap)) {
-          result += ((math.min(idR, idS), math.max(idR, idS)))
+        if (fastJaccard(probingRecord, indexedRecord, threshold, overlap, indexedPrefixLength, overlap)) {
+          result += ((math.min(probingId, indexedId), math.max(probingId, indexedId)))
         }
       }
 
@@ -121,7 +122,7 @@ object VeronicaJoin {
 
         // for self-joins and ordered collections, we can use a shorter prefix length for indexing
         val reqOverlap = threshold * (recordR.length + recordR.length).toDouble / (1.0 + threshold)
-        val reqOverlapCeil = Math.min(recordR.length, math.ceil(reqOverlap).toInt)
+        val reqOverlapCeil = math.min(recordR.length, math.ceil(reqOverlap).toInt)
         val rIndexPrefixLength = recordR.length - reqOverlapCeil + 1
 
         for (p <- 0 until rIndexPrefixLength) {
@@ -197,15 +198,15 @@ object VeronicaJoin {
 
   def run(sc: SparkContext, collectionR: RDD[(Long, Array[Int])], collectionS: RDD[(Long, Array[Int])], threshold: Double, selfJoin: Boolean, tokenRank: Broadcast[Map[Int, Int]]): RDD[(Long, Long)] = {
     def tokensToRanks(tokens: Array[Int]): Array[Int] = {
-      tokens.distinct.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray
+      tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray
     }
 
     def prefixLen(size: Int): Int = {
       if (size == 0) 0 else size - math.ceil(threshold * size).toInt + 1
     }
 
-    // Set number of partitions to match CPU cores
-    val numPartitions = 8
+    // Set number of partitions dynamically
+    val numPartitions = sc.defaultParallelism
 
     // Stage 2: RID-Pair Generation with optimized partitioning
     val rPrefixRDD: RDD[(Int, (String, Long, Array[Int]))] = collectionR.flatMap { case (id, tokens) =>
