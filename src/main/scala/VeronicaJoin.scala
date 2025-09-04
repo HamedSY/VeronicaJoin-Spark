@@ -196,7 +196,7 @@ object VeronicaJoin {
     result.toArray
   }
 
-  def run(sc: SparkContext, collectionR: RDD[(Long, Array[Int])], collectionS: RDD[(Long, Array[Int])], threshold: Double, selfJoin: Boolean, tokenRank: Broadcast[Map[Int, Int]]): RDD[(Long, Long)] = {
+  def run(sc: SparkContext, collectionR: RDD[(Long, Array[Int])], collectionS: RDD[(Long, Array[Int])], threshold: Double, selfJoin: Boolean, tokenRank: Broadcast[Map[Int, Int]], numR: Long, numS: Long, totalOccurrences: Long): RDD[(Long, Long)] = {
     def tokensToRanks(tokens: Array[Int]): Array[Int] = {
       tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray
     }
@@ -205,8 +205,13 @@ object VeronicaJoin {
       if (size == 0) 0 else size - math.ceil(threshold * size).toInt + 1
     }
 
-    // Set number of partitions dynamically
-    val numPartitions = sc.defaultParallelism
+    // Compute number of partitions adaptively
+    val numSetsForAvg = if (selfJoin) numR else numR + numS
+    val avgSize = if (numSetsForAvg == 0) 0.0 else totalOccurrences.toDouble / numSetsForAvg
+    val avgPlen = if (avgSize == 0) 0.0 else avgSize - math.ceil(threshold * avgSize) + 1
+    val expectedReplicated = ( (if (selfJoin) numR else numR + numS) * avgPlen ).toLong
+    val targetPerPartition = 100000L
+    val numPartitions = math.max(sc.defaultParallelism, if (expectedReplicated == 0 || targetPerPartition == 0) 1 else ((expectedReplicated + targetPerPartition - 1L) / targetPerPartition).toInt)
 
     // Stage 2: RID-Pair Generation with optimized partitioning
     val rPrefixRDD: RDD[(Int, (String, Long, Array[Int]))] = collectionR.flatMap { case (id, tokens) =>
