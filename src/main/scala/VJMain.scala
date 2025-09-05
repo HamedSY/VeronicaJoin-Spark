@@ -3,6 +3,8 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.broadcast.Broadcast
 import org.apache.log4j.{Level, Logger}
 import VeronicaJoin.run
+import org.apache.spark.partial.BoundedDouble
+import org.apache.spark.partial.PartialResult
 
 object VJMain extends App {
   Logger.getRootLogger.setLevel(Level.OFF)
@@ -33,17 +35,22 @@ object VJMain extends App {
   // datasetR.cache()
   // if (!selfJoin) datasetS.cache()
 
-  val numR = datasetR.count()
-  val numS = if (selfJoin) numR else datasetS.count()
+  val numRApprox: PartialResult[BoundedDouble] = datasetR.countApprox(1000)
+  val numR = numRApprox.getFinalValue.mean.toLong
+  val numS = if (selfJoin) numR else {
+    val numSApprox: PartialResult[BoundedDouble] = datasetS.countApprox(1000)
+    numSApprox.getFinalValue.mean.toLong
+  }
 
   // Compute global token ordering
   val allTokens = if (selfJoin) datasetR.flatMap(_._2) else datasetR.flatMap(_._2).union(datasetS.flatMap(_._2))
+  val totalOccurrencesApprox: PartialResult[BoundedDouble] = allTokens.countApprox(1000)
+  val totalOccurrences = totalOccurrencesApprox.getFinalValue.mean.toLong
   val tokenFreq = allTokens.map((_, 1L)).reduceByKey(_ + _)
   val tokenFreqList = tokenFreq.sortBy(_._2).collect()
   val globalOrdering = tokenFreqList.map(_._1)
   val tokenRankMap = globalOrdering.zipWithIndex.toMap
   val tokenRank: Broadcast[Map[Int, Int]] = sc.broadcast(tokenRankMap)
-  val totalOccurrences = tokenFreqList.map(_._2).sum
 
   // Run similarity join with timing
   var sumRuntime: Double = 0

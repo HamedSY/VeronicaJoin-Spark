@@ -210,7 +210,7 @@ object VeronicaJoin {
     val avgSize = if (numSetsForAvg == 0) 0.0 else totalOccurrences.toDouble / numSetsForAvg
     val avgPlen = if (avgSize == 0) 0.0 else avgSize - math.ceil(threshold * avgSize) + 1
     val expectedReplicated = ( (if (selfJoin) numR else numR + numS) * avgPlen ).toLong
-    val targetPerPartition = 100000L
+    val targetPerPartition = 2000L  // Further reduced for smaller partitions to mitigate OOM
     val numPartitions = math.max(sc.defaultParallelism, if (expectedReplicated == 0 || targetPerPartition == 0) 1 else ((expectedReplicated + targetPerPartition - 1L) / targetPerPartition).toInt)
 
     // Stage 2: RID-Pair Generation with optimized partitioning
@@ -242,9 +242,9 @@ object VeronicaJoin {
       sc.emptyRDD
     }
 
-    // Cache intermediate RDDs to reduce recomputation
-    rPrefixRDD.cache()
-    if (!selfJoin) sPrefixRDD.cache()
+    // No cache to save memory
+    // rPrefixRDD.cache()
+    // if (!selfJoin) sPrefixRDD.cache()
 
     val dataRDD = rPrefixRDD.union(sPrefixRDD).partitionBy(new HashPartitioner(numPartitions))
 
@@ -257,9 +257,7 @@ object VeronicaJoin {
       localRun(rLocal.sortBy(_._2.length), sLocal.sortBy(_._2.length), threshold, selfJoin).toIterable
     }
 
-    // Unpersist cached RDDs
-    rPrefixRDD.unpersist()
-    if (!selfJoin) sPrefixRDD.unpersist()
+    // No unpersist needed since no cache
 
     candidatePairs.distinct()
   }
