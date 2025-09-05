@@ -5,6 +5,7 @@ import org.apache.log4j.{Level, Logger}
 import VeronicaJoin.run
 import org.apache.spark.partial.BoundedDouble
 import org.apache.spark.partial.PartialResult
+import scala.collection.mutable
 
 object VJMain extends App {
   Logger.getRootLogger.setLevel(Level.OFF)
@@ -32,8 +33,6 @@ object VJMain extends App {
   // Read datasets
   val datasetR = readDataset(sc, inputFileR)
   val datasetS = if (selfJoin) datasetR else readDataset(sc, inputFileS)
-  // datasetR.cache()
-  // if (!selfJoin) datasetS.cache()
 
   val numRApprox: PartialResult[BoundedDouble] = datasetR.countApprox(1000)
   val numR = numRApprox.getFinalValue.mean.toLong
@@ -52,12 +51,44 @@ object VJMain extends App {
   val tokenRankMap = globalOrdering.zipWithIndex.toMap
   val tokenRank: Broadcast[Map[Int, Int]] = sc.broadcast(tokenRankMap)
 
+  // Precompute ranked datasets
+  val rankedR = datasetR.map { case (id, tokens) =>
+    (id, tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray)
+  }.cache()
+  val rankedS = if (selfJoin) rankedR else datasetS.map { case (id, tokens) =>
+    (id, tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray)
+  }.cache()
+
+  // Compute numPartitions
+  val numSetsForAvg = if (selfJoin) numR else numR + numS
+  val avgSize = if (numSetsForAvg == 0) 0.0 else totalOccurrences.toDouble / numSetsForAvg
+  val avgPlen = if (avgSize == 0) 0.0 else avgSize - math.ceil(threshold * avgSize) + 1
+  val expectedReplicated = ( (if (selfJoin) numR else numR + numS) * avgPlen ).toLong
+  val targetPerPartition = 10000L
+  val numPartitions = math.max(sc.defaultParallelism, if (expectedReplicated == 0 || targetPerPartition == 0) 1 else ((expectedReplicated + targetPerPartition - 1L) / targetPerPartition).toInt)
+
+  // Balance partition assignment for ranks
+  val tokenFreqMap = tokenFreqList.toMap
+  val sortedTokensDesc = tokenFreqList.sortBy(-_._2).map(_._1)
+  val partSums = Array.fill(numPartitions)(0L)
+  val pq = mutable.PriorityQueue[(Long, Int)]()(Ordering.by[(Long, Int), Long](_._1)) // min-heap by sum
+  for (p <- 0 until numPartitions) pq.enqueue((0L, p))
+  val rankToPartArr = new Array[Int](globalOrdering.length)
+  for (token <- sortedTokensDesc) {
+    val freq = tokenFreqMap(token)
+    val (s, p) = pq.dequeue()
+    val rank = tokenRankMap(token)
+    rankToPartArr(rank) = p
+    pq.enqueue((s + freq, p))
+  }
+  val rankToPart: Broadcast[Array[Int]] = sc.broadcast(rankToPartArr)
+
   // Run similarity join with timing
   var sumRuntime: Double = 0
-  val runNumber = 1
+  val runNumber = 10
   for (i <- 0 until runNumber) {
     val startTime = System.nanoTime()
-    val result = VeronicaJoin.run(sc, datasetR, datasetS, threshold, selfJoin, tokenRank, numR, numS, totalOccurrences)
+    val result = VeronicaJoin.run(sc, rankedR, rankedS, threshold, selfJoin, tokenRank, numR, numS, totalOccurrences, numPartitions, rankToPart)
     val count = result.count()
     val endTime = System.nanoTime()
     val runtime = (endTime - startTime) / 1e9 
@@ -68,6 +99,9 @@ object VJMain extends App {
 
   val avgRuntime = sumRuntime / runNumber
   println(s"Average Runtime: $avgRuntime")
+
+  rankedR.unpersist()
+  if (!selfJoin) rankedS.unpersist()
 
   sc.stop()
 

@@ -196,55 +196,38 @@ object VeronicaJoin {
     result.toArray
   }
 
-  def run(sc: SparkContext, collectionR: RDD[(Long, Array[Int])], collectionS: RDD[(Long, Array[Int])], threshold: Double, selfJoin: Boolean, tokenRank: Broadcast[Map[Int, Int]], numR: Long, numS: Long, totalOccurrences: Long): RDD[(Long, Long)] = {
-    def tokensToRanks(tokens: Array[Int]): Array[Int] = {
-      tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray
-    }
+  def run(sc: SparkContext, collectionR: RDD[(Long, Array[Int])], collectionS: RDD[(Long, Array[Int])], threshold: Double, selfJoin: Boolean, tokenRank: Broadcast[Map[Int, Int]], numR: Long, numS: Long, totalOccurrences: Long, numPartitions: Int, rankToPart: Broadcast[Array[Int]]): RDD[(Long, Long)] = {
 
     def prefixLen(size: Int): Int = {
       if (size == 0) 0 else size - math.ceil(threshold * size).toInt + 1
     }
 
-    // Compute number of partitions adaptively
-    val numSetsForAvg = if (selfJoin) numR else numR + numS
-    val avgSize = if (numSetsForAvg == 0) 0.0 else totalOccurrences.toDouble / numSetsForAvg
-    val avgPlen = if (avgSize == 0) 0.0 else avgSize - math.ceil(threshold * avgSize) + 1
-    val expectedReplicated = ( (if (selfJoin) numR else numR + numS) * avgPlen ).toLong
-    val targetPerPartition = 2000L  // Further reduced for smaller partitions to mitigate OOM
-    val numPartitions = math.max(sc.defaultParallelism, if (expectedReplicated == 0 || targetPerPartition == 0) 1 else ((expectedReplicated + targetPerPartition - 1L) / targetPerPartition).toInt)
-
     // Stage 2: RID-Pair Generation with optimized partitioning
-    val rPrefixRDD: RDD[(Int, (String, Long, Array[Int]))] = collectionR.flatMap { case (id, tokens) =>
-      val ranks = tokensToRanks(tokens)
+    val rPrefixRDD: RDD[(Int, (String, Long, Array[Int]))] = collectionR.flatMap { case (id, ranks) =>
       val plen = prefixLen(ranks.length)
       if (plen <= 0) {
         Seq.empty
       } else {
         val prefix = ranks.take(plen)
-        val groups = prefix.map(r => r % numPartitions).toSet
+        val groups = prefix.map(r => rankToPart.value(r)).toSet
         groups.map(g => (g, ("R", id, ranks)))
       }
     }
 
     val sPrefixRDD: RDD[(Int, (String, Long, Array[Int]))] = if (!selfJoin) {
-      collectionS.flatMap { case (id, tokens) =>
-        val ranks = tokensToRanks(tokens)
+      collectionS.flatMap { case (id, ranks) =>
         val plen = prefixLen(ranks.length)
         if (plen <= 0) {
           Seq.empty
         } else {
           val prefix = ranks.take(plen)
-          val groups = prefix.map(r => r % numPartitions).toSet
+          val groups = prefix.map(r => rankToPart.value(r)).toSet
           groups.map(g => (g, ("S", id, ranks)))
         }
       }
     } else {
       sc.emptyRDD
     }
-
-    // No cache to save memory
-    // rPrefixRDD.cache()
-    // if (!selfJoin) sPrefixRDD.cache()
 
     val dataRDD = rPrefixRDD.union(sPrefixRDD).partitionBy(new HashPartitioner(numPartitions))
 
@@ -256,8 +239,6 @@ object VeronicaJoin {
       val sLocal = if (selfJoin) rLocal else items.filter(_._1 == "S").map { case (_, id, tok) => (id, tok) }
       localRun(rLocal.sortBy(_._2.length), sLocal.sortBy(_._2.length), threshold, selfJoin).toIterable
     }
-
-    // No unpersist needed since no cache
 
     candidatePairs.distinct()
   }
