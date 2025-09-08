@@ -6,6 +6,7 @@ import VeronicaJoin.run
 import org.apache.spark.partial.BoundedDouble
 import org.apache.spark.partial.PartialResult
 import scala.collection.mutable
+import org.apache.spark.storage.StorageLevel
 
 object VJMain extends App {
   Logger.getRootLogger.setLevel(Level.OFF)
@@ -54,18 +55,18 @@ object VJMain extends App {
   // Precompute ranked datasets
   val rankedR = datasetR.map { case (id, tokens) =>
     (id, tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray)
-  }.cache()
+  }.persist(StorageLevel.MEMORY_AND_DISK)
   val rankedS = if (selfJoin) rankedR else datasetS.map { case (id, tokens) =>
     (id, tokens.flatMap(t => tokenRank.value.get(t).toSeq).sorted.toArray)
-  }.cache()
+  }.persist(StorageLevel.MEMORY_AND_DISK)
 
   // Compute numPartitions
   val numSetsForAvg = if (selfJoin) numR else numR + numS
   val avgSize = if (numSetsForAvg == 0) 0.0 else totalOccurrences.toDouble / numSetsForAvg
   val avgPlen = if (avgSize == 0) 0.0 else avgSize - math.ceil(threshold * avgSize) + 1
   val expectedReplicated = ( (if (selfJoin) numR else numR + numS) * avgPlen ).toLong
-  val targetPerPartition = 10000L
-  val numPartitions = math.max(sc.defaultParallelism, if (expectedReplicated == 0 || targetPerPartition == 0) 1 else ((expectedReplicated + targetPerPartition - 1L) / targetPerPartition).toInt)
+  val targetPerPartition = math.max(10000L, expectedReplicated / (sc.defaultParallelism * 4))
+  val numPartitions = math.max(2, math.min(sc.defaultParallelism * 2, if (expectedReplicated == 0 || targetPerPartition == 0) 1 else ((expectedReplicated + targetPerPartition - 1L) / targetPerPartition).toInt))
 
   // Balance partition assignment for ranks
   val tokenFreqMap = tokenFreqList.toMap
