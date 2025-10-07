@@ -22,11 +22,11 @@ object VJMain extends App {
   val selfJoin = inputFileR == inputFileS
 
   val conf = new SparkConf().setAppName("VeronicaJoin").setMaster("local[*]")
-    .set("spark.driver.memory", "16g") // Increase driver memory (e.g., 8GB)
-    .set("spark.executor.memory", "16g") // Increase executor memory (e.g., 8GB)
+    .set("spark.driver.memory", "16g")
+    .set("spark.executor.memory", "16g")
     .set("spark.driver.extraJavaOptions", "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:G1ReservePercent=20")
-    .set("spark.memory.fraction", "0.8")  // 80% for execution/storage, 20% for overhead
-    .set("spark.memory.storageFraction", "0.4")  // Balance storage vs. execution
+    .set("spark.memory.fraction", "0.8")
+    .set("spark.memory.storageFraction", "0.4")
     .set("spark.ui.showConsoleProgress", "false")
     .set("spark.eventLog.enabled", "false")
   val sc = new SparkContext(conf)
